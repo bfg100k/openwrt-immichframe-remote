@@ -1,0 +1,220 @@
+#!/bin/sh
+# This script turns on/off (aka dim/undim) one or more immichFrame photo display(s)
+# based on the presence of one or more WIFI connected device(s).
+# It is intended to be called by the hostapd_cli action hook.
+# e.g. hostapd_cli -a /usr/bin/immichframe_remote -i [WIFI interface] -B
+#
+# Additionally, call this script with no arguments to turn on/off
+# the photo display(s) depending on operational hours (useful as cron job targets)
+#
+# Author: SidneyC <sidneyc_at_outlook_dot_com>
+#
+#######################################################################################
+
+#DEBUG=1  #uncomment to debug script
+
+### USER CONFIGURATION REQUIRED ###
+#define time window when display is active. Only hour in 24 hours format accepted
+START_HOUR=7
+START_MIN=0
+END_HOUR=22
+END_MIN=0
+#Target MAC addresses to track (use lowercase, separated by spaces)
+DEVICE_MACS="aa:bb:cc:dd:ee:ff bb:bb:cc:dd:ee:ff"
+#FQDN or IP of immichframe devices (separate multiple targets by spaces)
+IMMICHFRAME_TARGETS="NMP-FRAMEO.lan"
+#Delay before sending pause/dim commands to the displays
+#Eliminate unnecessary start/stop due to device wifi transient dropouts or band change
+TIMEOUT_SECS=120
+#multi-band support (useful only if tracking more than 1 device AND multiple bands in use)
+ENABLE_MULTIBAND=1
+
+### SCRIPT VARS ###
+STATE_FILE="/tmp/hostapd_group_timer"
+#Use system logger as this script is called by hostapd_cli action hook
+USE_LOGGER="immichframe_remote"
+
+### UTILITY FUCTIONS ###
+_err() {
+  echo "ERROR: $1" >&2
+  [ -n "$USE_LOGGER" ] && logger -t "$USE_LOGGER" "ERROR: $1"
+  return 0
+}
+
+_warn() {
+  echo "WARN: $1"
+  [ -n "$USE_LOGGER" ] && logger -t "$USE_LOGGER" "WARN: $1"
+  return 0
+}
+
+_info() {
+  echo "INFO: $1"
+  [ -n "$USE_LOGGER" ] && logger -t "$USE_LOGGER" "INFO: $1"
+  return 0
+}
+
+_debug() {
+  [ -n "$DEBUG" ] && echo "DEBUG: $1" && \
+    [ -n "$USE_LOGGER" ] && logger -t "$USE_LOGGER" "DEBUG: $1"
+  return 0
+}
+
+### SCRIPT FUNCTIONS ###
+
+# Check if this is an event we are after
+_is_interested_event() {
+  [ "$EVENT" != "AP-STA-CONNECTED" ] && \
+    [ "$EVENT" != "AP-STA-DISCONNECTED" ] && \
+    _debug "Not an event we are after - $EVENT" && \
+    return 1
+  return 0
+}
+
+# Check if we are in the operational hours
+_is_operational_hours() {
+  # Fetch current hour and minute as integers
+  local cur_h=$(date +"%H" | sed 's/^0//')
+  local cur_m=$(date +"%M" | sed 's/^0//')
+  [ -z "$cur_h" ] && cur_h=0
+  [ -z "$cur_m" ] && cur_m=0
+
+  # Convert everything to minutes past midnight for clean mathematical comparison
+  local now=$(( (cur_h * 60) + cur_m ))
+  local start_limit=$(( (START_HOUR * 60) + START_MIN ))
+  local end_limit=$(( (END_HOUR * 60) + END_MIN ))
+
+  if [ "$now" -ge "$start_limit" ] && [ "$now" -le "$end_limit" ]; then
+    return 0
+  else
+    _debug "Time is NOT between $START_HOUR:$START_MIN and $END_HOUR:$END_MIN" && \
+    return 1
+  fi
+}
+
+# Check if triggering MAC is inside our monitored list
+_is_interested_device() {
+  local match=0
+  for mac in $DEVICE_MACS; do
+    if [ "$mac" = "$TRIGGER_MAC" ]; then
+      match=1
+      break
+    fi
+  done
+  [ "$match" -eq 0 ] && \
+    _debug "Not a device of interest, nothing to do" && \
+    return 1
+  return 0
+}
+
+# Count how many target devices are currently connected
+_get_active_count() {
+  local count=0
+  local raw_data=""
+  if [ -z "$ENABLE_MULTIBAND" ]; then
+    # Query iwinfo directly for the interface's current associated MAC addresses
+    raw_data=$(iwinfo "$IFACE" assoclist)
+  else
+    # Loop through every physical or virtual wifi interface registered in the kernel
+    for dev in /sys/class/net/*; do
+      local iface="${dev##*/}"
+      # Only query interfaces that contain a wireless configuration directory
+      if [ -d "/sys/class/net/$iface/phy80211" ] || [ -d "/sys/class/net/$iface/wireless" ]; then
+        # Query iwinfo safely, ignoring standard errors if an interface is down
+        local output=$(iwinfo "$iface" assoclist 2>/dev/null)
+        raw_data="$raw_data $output"
+      fi
+    done
+  fi
+
+  # Filter out valid MAC structures and drop everything to lowercase
+  local connected_stations=$(echo "$raw_data" | grep -oE '[0-9a-fA-F:]{17}' | awk '{print tolower($0)}')
+
+  for mac in $DEVICE_MACS; do
+    if echo "$connected_stations" | grep -q "$mac"; then
+      count=$((count + 1))
+    fi
+  done
+  echo "$count"
+}
+
+_send_command() {
+  # Loop through targets to send the command
+  for if_target in $IMMICHFRAME_TARGETS; do
+    _debug "Sending $1 command to target [$if_target]"
+    # use uclient-fetch which is a lighter weight wget tool
+    uclient-fetch -q -O /dev/null "http://$if_target:53287/$1"
+  done
+}
+
+# Handle the event
+_handle_event() {
+  local active_count=0
+  # We can just call _get_active_count or be alittle smarter to save some CPU cycles
+  case "$DEVICE_MACS" in
+    *" "*)
+        # multiple macs being tracked, let's call _get_active_count
+        active_count=$(_get_active_count)
+        ;;
+    *)
+        # only 1 device being tracked and this is a connection event
+        [ "$EVENT" = "AP-STA-CONNECTED" ] && active_count=1
+        ;;
+  esac
+  _debug "There are $active_count target device(s) currently connected"
+
+  if [ "$EVENT" = "AP-STA-CONNECTED" ]; then
+    # At least one target device is back. Destroy the timer file to cancel the action.
+    rm "$STATE_FILE" 2>1 >/dev/null
+    # If deletion fails and this is the first (or only) active device, assume display is in dim state so send undim comm
+    [ $? -ne 0 ] && [ "$active_count" -eq 1 ] && _send_command "undim"
+  elif [ "$EVENT" = "AP-STA-DISCONNECTED" ]; then
+    # If the last monitored device just left, start the background timer
+    if [ "$active_count" -eq 0 ]; then
+      # Create a unique timestamp token for this specific disconnect event
+      local timestamp=$(date +%s)
+      echo "$timestamp" > "$STATE_FILE"
+      # Spawn a background process so hostapd_cli does not block
+      _debug "spawning background process and sleeping for $TIMEOUT_SECS seconds"
+      (
+        sleep "$TIMEOUT_SECS"
+        # Verify the timer file wasn't deleted (reconnect) or updated (flicker)
+        if [ -f "$STATE_FILE" ] && [ "$(cat "$STATE_FILE")" = "$timestamp" ]; then
+          # Success: Send the webhook via OpenWrt's built-in uclient-fetch or curl
+          _send_command "dim"
+          rm -f "$STATE_FILE"
+        fi
+      ) &
+    fi
+  fi
+}
+
+### MAIN PROGRAM ###
+
+#non-hostapd trigger - turn on/off depending on defined operational hours
+if [ -z "$1" ]; then
+  _debug "handling non-hostapd event"
+  if [ _is_operational_hours ]; then
+    _send_command "undim"
+  else
+    _send_command "dim"
+  fi
+  exit 0
+fi
+
+# hostapd_cli arguments: $1 = interface, $2 = event type, $3 = MAC address
+IFACE="$1"
+EVENT="$2"
+TRIGGER_MAC=$(echo "$3" | awk '{print tolower($0)}')
+
+_debug "EVENT - $EVENT, MAC - $TRIGGER_MAC, INTERFACE - $IFACE"
+
+#pre-processing checks
+_is_interested_event  || exit 0
+_is_operational_hours || exit 0
+_is_interested_device || exit 0
+
+#checks pass, handle the event
+_debug "pre-processing checks passed, handling event"
+_handle_event
+
+exit 0

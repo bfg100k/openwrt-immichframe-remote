@@ -1,0 +1,28 @@
+#!/bin/sh /etc/rc.common
+
+START=95
+USE_PROCD=1
+
+ACTION_SCRIPT="/usr/bin/immichframe_remote"
+
+start_service() {
+    [ -x "$ACTION_SCRIPT" ] || return 1
+
+    # Look through active network interfaces dynamically
+    for dev in /sys/class/net/*; do
+        local iface="${dev##*/}"
+
+        # Check if the interface is an 802.11 wireless device
+        if [ -d "/sys/class/net/$iface/phy80211" ] || [ -d "/sys/class/net/$iface/wireless" ]; then
+
+            # Spin up a unique Procd process container named after the interface
+            procd_open_instance "watcher_$iface"
+            procd_set_param command /usr/sbin/hostapd_cli
+            procd_append_param command -i "$iface"
+            procd_append_param command -a "$ACTION_SCRIPT"
+            procd_set_param respawn
+            procd_close_instance
+
+        fi
+    done
+}

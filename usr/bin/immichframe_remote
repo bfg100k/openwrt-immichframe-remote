@@ -11,7 +11,7 @@
 #
 #######################################################################################
 
-#DEBUG=1  #uncomment to debug script
+LOG=1  #1 - DEBUG, 2 - INFO, 3 - WARN, 4 - ERROR
 
 ### USER CONFIGURATION REQUIRED ###
 #define time window when display is active. Only hour in 24 hours format accepted
@@ -36,25 +36,25 @@ USE_LOGGER="immichframe_remote"
 
 ### UTILITY FUCTIONS ###
 _err() {
-  echo "ERROR: $1" >&2
+  [ "$LOG" -le 4 ] && echo "ERROR: $1" >&2 && \
   [ -n "$USE_LOGGER" ] && logger -t "$USE_LOGGER" "ERROR: $1"
   return 0
 }
 
 _warn() {
-  echo "WARN: $1"
+  [ "$LOG" -le 3 ] && echo "WARN: $1" && \
   [ -n "$USE_LOGGER" ] && logger -t "$USE_LOGGER" "WARN: $1"
   return 0
 }
 
 _info() {
-  echo "INFO: $1"
+  [ "$LOG" -le 2 ] && echo "INFO: $1" && \
   [ -n "$USE_LOGGER" ] && logger -t "$USE_LOGGER" "INFO: $1"
   return 0
 }
 
 _debug() {
-  [ -n "$DEBUG" ] && echo "DEBUG: $1" && \
+  [ "$LOG" -le 1 ] && echo "DEBUG: $1" && \
     [ -n "$USE_LOGGER" ] && logger -t "$USE_LOGGER" "DEBUG: $1"
   return 0
 }
@@ -140,7 +140,7 @@ _get_active_count() {
 _send_command() {
   # Loop through targets to send the command
   for if_target in $IMMICHFRAME_TARGETS; do
-    _debug "Sending $1 command to target [$if_target]"
+    _info "Sending $1 command to target [$if_target]"
     # use uclient-fetch which is a lighter weight wget tool
     uclient-fetch -q -O /dev/null "http://$if_target:53287/$1"
   done
@@ -160,7 +160,7 @@ _handle_event() {
         [ "$EVENT" = "AP-STA-CONNECTED" ] && active_count=1
         ;;
   esac
-  _debug "There are $active_count target device(s) currently connected"
+  _info "There are $active_count target device(s) currently connected"
 
   if [ "$EVENT" = "AP-STA-CONNECTED" ]; then
     # At least one target device is back. Destroy the timer file to cancel the action.

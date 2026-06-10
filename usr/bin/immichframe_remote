@@ -82,11 +82,11 @@ _is_operational_hours() {
   local now=$(( (cur_h * 60) + cur_m ))
   local start_limit=$(( (START_HOUR * 60) + START_MIN ))
   local end_limit=$(( (END_HOUR * 60) + END_MIN ))
-
   if [ "$now" -ge "$start_limit" ] && [ "$now" -le "$end_limit" ]; then
+    _debug "Time now ($cur_h:$cur_m) is between $START_HOUR:$START_MIN and $END_HOUR:$END_MIN" && \
     return 0
   else
-    _debug "Time is NOT between $START_HOUR:$START_MIN and $END_HOUR:$END_MIN" && \
+    _info "Time now ($cur_h:$cur_m) is NOT between $START_HOUR:$START_MIN and $END_HOUR:$END_MIN" && \
     return 1
   fi
 }
@@ -101,7 +101,7 @@ _is_interested_device() {
     fi
   done
   [ "$match" -eq 0 ] && \
-    _debug "Not a device of interest, nothing to do" && \
+    _info "Not a device of interest, nothing to do" && \
     return 1
   return 0
 }
@@ -164,6 +164,7 @@ _handle_event() {
 
   if [ "$EVENT" = "AP-STA-CONNECTED" ]; then
     # At least one target device is back. Destroy the timer file to cancel the action.
+    _debug "Active count is $active_count. State file does $([ -f "$STATE_FILE" ] || echo "not") exist."
     rm "$STATE_FILE" 2>1 >/dev/null
     # If deletion fails and this is the first (or only) active device, assume display is in dim state so send undim comm
     [ $? -ne 0 ] && [ "$active_count" -eq 1 ] && _send_command "undim"
@@ -192,8 +193,8 @@ _handle_event() {
 
 #non-hostapd trigger - turn on/off depending on defined operational hours
 if [ -z "$1" ]; then
-  _debug "handling non-hostapd event"
-  if [ _is_operational_hours ]; then
+  _info "handling non-hostapd event"
+  if _is_operational_hours; then
     _send_command "undim"
   else
     _send_command "dim"
@@ -214,7 +215,7 @@ _is_operational_hours || exit 0
 _is_interested_device || exit 0
 
 #checks pass, handle the event
-_debug "pre-processing checks passed, handling event"
+_info "pre-processing checks passed, handling event"
 _handle_event
 
 exit 0

@@ -20,9 +20,32 @@ start_service() {
             procd_set_param command /usr/sbin/hostapd_cli
             procd_append_param command -i "$iface"
             procd_append_param command -a "$ACTION_SCRIPT"
-            procd_set_param respawn
+            # RESPAWN CONFIGURATION: (retry in the event hostapd isn't ready)
+            # 3600 = total threshold time in seconds
+            # 15   = seconds to wait before trying a restart after a crash
+            # 5    = how many times to retry before giving up entirely (0 = infinite)
+            procd_set_param respawn 2600 15 5
             procd_close_instance
 
         fi
     done
+}
+
+stop_service() {
+    # Procd tracks instances by name.
+    # To cleanly stop them, we iterate through the interfaces again
+    # to let procd know exactly which instances to terminate.
+    for dev in /sys/class/net/*; do
+        local iface="${dev##*/}"
+        if [ -d "/sys/class/net/$iface/phy80211" ] || [ -d "/sys/class/net/$iface/wireless" ]; then
+            procd_kill "immichframe_remote" "watcher_$iface"
+        fi
+    done
+}
+
+reload_service() {
+    # If the network configuration changes, stopping and starting
+    # ensures newly created virtual interfaces are caught.
+    stop_service
+    start_service
 }
